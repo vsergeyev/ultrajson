@@ -45,6 +45,8 @@ struct DecoderState
 	wchar_t *escEnd;
 	int escHeap;
 	int lastType;
+	int level;
+	int recursionMax;
 	JSONObjectDecoder *dec;
 };
 
@@ -676,9 +678,9 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_array( struct DecoderState *ds)
 
 FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_object( struct DecoderState *ds)
 {
-	JSOBJ itemName;
-	JSOBJ itemValue;
-	JSOBJ newObj = ds->dec->newObject();
+       JSOBJ itemName;
+       JSOBJ itemValue;
+       JSOBJ newObj = ds->dec->newObject();
 
 	ds->start ++;
 
@@ -689,6 +691,7 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_object( struct DecoderState *ds)
 		if ((*ds->start) == '}')
 		{
 			ds->start ++;
+			ds->level --;
 			return newObj;
 		}
 
@@ -697,12 +700,14 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_object( struct DecoderState *ds)
 
 		if (itemName == NULL)
 		{
+		    ds->level --;
 			ds->dec->releaseObject(newObj);
 			return NULL;
 		}
 
 		if (ds->lastType != JT_UTF8)
 		{
+		    ds->level --;
 			ds->dec->releaseObject(newObj);
 			ds->dec->releaseObject(itemName);
 			return SetError(ds, -1, "Key name of object must be 'string' when decoding 'object'");
@@ -712,6 +717,7 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_object( struct DecoderState *ds)
 
 		if (*(ds->start++) != ':')
 		{
+		    ds->level --;
 			ds->dec->releaseObject(newObj);
 			ds->dec->releaseObject(itemName);
 			return SetError(ds, -1, "No ':' found when decoding object value");
@@ -723,6 +729,7 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_object( struct DecoderState *ds)
 
 		if (itemValue == NULL)
 		{
+		    ds->level --;
 			ds->dec->releaseObject(newObj);
 			ds->dec->releaseObject(itemName);
 			return NULL;
@@ -735,17 +742,20 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_object( struct DecoderState *ds)
 		switch (*(ds->start++))
 		{
 			case '}':
+			    ds->level --;
 				return newObj;
 
 			case ',':
 				break;
 
 			default:
+			    ds->level --;
 				ds->dec->releaseObject(newObj);
 				return SetError(ds, -1, "Unexpected character in found when decoding object value");
 		}
 	}
-
+    
+    ds->level --;
 	ds->dec->releaseObject(newObj);
 	return SetError(ds, -1, "Unmatched '}' when decoding object");
 }
@@ -772,7 +782,32 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_any(struct DecoderState *ds)
 				return decode_numeric (ds);
 
 			case '[':	return decode_array (ds);
-			case '{': return decode_object (ds);
+			case '{':
+			     if (ds->level > ds->recursionMax)
+                    {
+                        int level_obj;
+                        level_obj = 1;
+                        while (1)
+                        {
+                            ds->start ++;
+                            switch (*ds->start)
+                            {
+                                case '{':
+                                    level_obj ++;
+                                case '}':
+                                    level_obj --;
+                            }
+
+                            if (level_obj == 0)
+                            {
+                                ds->start ++;
+                                ds->lastType = JT_FALSE;
+                                return ds->dec->newFalse();
+                            }
+                        }
+                    }
+                 ds->level ++;
+			     return decode_object (ds);
 			case 't': return decode_true (ds);
 			case 'f': return decode_false (ds);
 			case 'n': return decode_null (ds);
@@ -794,7 +829,6 @@ FASTCALL_ATTR JSOBJ FASTCALL_MSVC decode_any(struct DecoderState *ds)
 
 JSOBJ JSON_DecodeObject(JSONObjectDecoder *dec, const char *buffer, size_t cbBuffer)
 {
-
 	/*
 	FIXME: Base the size of escBuffer of that of cbBuffer so that the unicode escaping doesn't run into the wall each time */
 	struct DecoderState ds;
@@ -810,8 +844,14 @@ JSOBJ JSON_DecodeObject(JSONObjectDecoder *dec, const char *buffer, size_t cbBuf
 	ds.dec = dec;
 	ds.dec->errorStr = NULL;
 	ds.dec->errorOffset = NULL;
+	ds.level = 0;
 
 	ds.dec = dec;
+
+    if (ds.recursionMax < 1)
+	{
+		ds.recursionMax = JSON_MAX_RECURSION_DEPTH_DECODER;
+	}
 
 	ret = decode_any (&ds);
 	
